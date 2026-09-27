@@ -5,3 +5,4 @@ beautifulsoup4
 requests
 pandas
 numpy
+google-generativeai
