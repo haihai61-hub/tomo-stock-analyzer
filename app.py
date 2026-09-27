@@ -131,7 +131,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 定型ルール判定
+# 定型ルール判定（フォールバック）
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -163,7 +163,7 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 """
 
 # -------------------------------------------------------------
-# Gemini AIエンジン
+# Gemini AIエンジン（現行世代の無料Flashモデルを自動探索）
 # -------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
@@ -193,25 +193,39 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 ※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
 """
 
-    free_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-8b"
-    ]
-    
     errors = []
-    for model_name in free_models:
+    target_models = []
+
+    try:
+        # APIがサポートしている現行モデルを動的に取得
+        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 無料枠がある Flash 系モデルを最新順に優先配置
+        flash_models = [m for m in all_models if "flash" in m.lower()]
+        flash_models.sort(reverse=True)
+        
+        other_models = [m for m in all_models if m not in flash_models]
+        other_models.sort(reverse=True)
+        
+        target_models = flash_models + other_models
+    except Exception as e:
+        errors.append(f"[モデル一覧取得失敗] {e}")
+        target_models = ["models/gemini-3.1-flash", "models/gemini-3.0-flash", "models/gemini-2.5-flash"]
+
+    for model_name in target_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response.text:
-                return response.text, None
+                clean_name = model_name.replace("models/", "")
+                footer = f"\n\n---\n*🤖 診断エンジン: {clean_name}（リアルタイムAI解析）*"
+                return response.text + footer, None
         except Exception as e:
-            errors.append(f"[{model_name}] {e}")
+            clean_name = model_name.replace("models/", "")
+            errors.append(f"[{clean_name}] {e}")
             continue
             
-    return None, "\n".join(errors)
+    return None, "\n\n".join(errors)
 
 # -------------------------------------------------------------
 # UIレイアウト
