@@ -132,65 +132,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 生成AI（Gemini）自動モデル探索＆診断エンジン
-# -------------------------------------------------------------
-def run_ai_gemini_diagnostic(api_key: str, ticker: str, name: str, meta: dict, metrics: dict, stockscope: dict):
-    try:
-        genai.configure(api_key=api_key)
-        
-        # 利用可能なモデルを自動取得してマッチング
-        selected_model_name = None
-        try:
-            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            # 優先候補順に探索
-            for pref in ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-pro", "gemini-1.5-pro"]:
-                for m_name in available_models:
-                    if pref in m_name:
-                        selected_model_name = m_name
-                        break
-                if selected_model_name:
-                    break
-            
-            if not selected_model_name and available_models:
-                selected_model_name = available_models[0]
-        except Exception:
-            selected_model_name = "gemini-1.5-flash-latest"
-
-        if not selected_model_name:
-            selected_model_name = "gemini-1.5-flash-latest"
-
-        model = genai.GenerativeModel(selected_model_name)
-        
-        prompt = f"""
-あなたは株式需給分析の専門家（トレーダーTOMO流）です。
-以下の客観的な東証市場データおよび需給数値をもとに、歯切れの良い実践的なトレード診断レポートを作成してください。
-
-【銘柄情報】
-- 銘柄名: {name} ({meta['symbol']})
-- 確定終値: {meta['close']:,} 円 ({meta['diff']})
-- 直近取引日出来高: {meta['volume']:,} 株
-- 平常時の常時出来高（直近中央値）: {metrics['regular_volume']:,} 株
-
-【需給データ】
-- 信用買残: {stockscope['margin_buy']:,} 株
-- 買残 / 常時出来高: {metrics['turnover_days']} 倍（消化にかかる日数感）
-- 推定しこり率: {metrics['shikori_rate']}%（現在値より上で捕まっている含み損玉の割合）
-- 制度信用比率: {stockscope['seido_ratio']}%（6ヶ月期日リスクの度合い）
-- 機関空売り動向: {stockscope['short_trend']}
-
-【診断レポートの構成】
-1. 【総合判定】: 「🚀 青天井・全員含み益（上値軽快）」「⚠️ 上値激重・手出し無用（しこり優勢）」「⚖️ 需給拮抗・もみ合い警戒」等の明確な結論。
-2. 【需給の急所】: しこり玉の薄さ/重さ、出来高と買残の消化力、期日の投げリスクなどを簡潔に解説。
-3. 【トレード戦略】: 節目となるライン（支持帯・抵抗帯）、ブレイク狙い・押し目買い・見送りの具体判断。
-※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
-"""
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"⚠️ Gemini API呼び出しエラー: {e}\n\n※APIキーを確認してください。未入力の場合は従来のルール判定で表示されます。"
-
-# -------------------------------------------------------------
-# 従来型のフォールバック判定
+# 定型ルール判定（AIが使えない時の安全な受け皿）
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -219,9 +161,59 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 
 **2. トレード結論**
 - {action}
-
-*(※Gemini API未接続のため、高速ルール判定で表示中)*
 """
+
+# -------------------------------------------------------------
+# 生成AI（Gemini無料枠Flashモデル優先＋自動再試行エンジン）
+# -------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
+    genai.configure(api_key=api_key)
+    
+    prompt = f"""
+あなたは株式需給分析の専門家（トレーダーTOMO流）です。
+以下の客観的な東証市場データおよび需給数値をもとに、歯切れの良い実践的なトレード診断レポートを作成してください。
+
+【銘柄情報】
+- 銘柄名: {company_name} ({symbol})
+- 確定終値: {close_price:,} 円 ({diff})
+- 直近取引日出来高: {volume:,} 株
+- 平常時の常時出来高（直近中央値）: {reg_vol:,} 株
+
+【需給データ】
+- 信用買残: {margin_buy:,} 株
+- 買残 / 常時出来高: {turnover_days} 倍（消化にかかる日数感）
+- 推定しこり率: {shikori}%（現在値より上で捕まっている含み損玉の割合）
+- 制度信用比率: {seido}%（6ヶ月期日リスクの度合い）
+- 機関空売り動向: {short_trend}
+
+【診断レポートの構成】
+1. 【総合判定】: 「🚀 青天井・全員含み益（上値軽快）」「⚠️ 上値激重・手出し無用（しこり優勢）」「⚖️ 需給拮抗・もみ合い警戒」等の明確な結論。
+2. 【需給の急所】: しこり玉の薄さ/重さ、出来高と買残の消化力、期日の投げリスクなどを簡潔に解説。
+3. 【トレード戦略】: 節目となるライン（支持帯・抵抗帯）、ブレイク狙い・押し目買い・見送りの具体判断。
+※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
+"""
+
+    # 無料枠で確実に利用できるFlashモデルを順番に試行
+    free_models = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-8b"
+    ]
+    
+    last_err = ""
+    for model_name in free_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            if response.text:
+                return response.text, None
+        except Exception as e:
+            last_err = str(e)
+            continue
+            
+    return None, last_err
 
 # -------------------------------------------------------------
 # UIレイアウト
@@ -289,9 +281,26 @@ else:
         
         active_key = api_key_input.strip() if api_key_input else ""
         if active_key:
-            with st.spinner("Gemini AIが相場と需給構造を深掘り分析中..."):
-                report = run_ai_gemini_diagnostic(active_key, ticker_input, company_name, meta_info, metrics, stockscope_data)
-                st.markdown(report)
+            with st.spinner("Gemini AIが需給構造を深掘り分析中..."):
+                ai_text, err = get_cached_ai_report(
+                    active_key,
+                    meta_info['symbol'],
+                    company_name,
+                    meta_info['close'],
+                    meta_info['diff'],
+                    meta_info['volume'],
+                    metrics['regular_volume'],
+                    stockscope_data['margin_buy'],
+                    metrics['turnover_days'],
+                    metrics['shikori_rate'],
+                    stockscope_data['seido_ratio'],
+                    stockscope_data['short_trend']
+                )
+                if ai_text:
+                    st.markdown(ai_text)
+                else:
+                    st.warning("⚠️ Geminiの無料枠制限・通信エラーが発生したため、ルールベース判定に切り替えました。")
+                    st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
         else:
             st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
             st.info("💡 左下のサイドバーにGemini APIキーを入力すると、本物のAIによる完全オーダーメイド診断に切り替わります。")
