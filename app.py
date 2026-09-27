@@ -12,7 +12,6 @@ import google.generativeai as genai
 
 st.set_page_config(page_title="TOMO流 需給×チャート全自動診断 ＋ AI", page_icon="📈", layout="wide")
 
-# Google翻訳ブロック
 components.html(
     """<script>
     const doc = window.parent.document;
@@ -108,7 +107,7 @@ def fetch_real_market_data(ticker_code: str):
         return None, f"データ取得エラー: {e}"
 
 # -------------------------------------------------------------
-# 需給・価格帯別出来高の計算
+# 需給指標の計算
 # -------------------------------------------------------------
 def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     regular_volume = int(df['Volume'].tail(40).median())
@@ -132,7 +131,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 定型ルール判定（AIが使えない時の安全な受け皿）
+# 定型ルール判定
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -164,7 +163,7 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 """
 
 # -------------------------------------------------------------
-# 生成AI（Gemini無料枠Flashモデル優先＋自動再試行エンジン）
+# Gemini AIエンジン
 # -------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
@@ -194,7 +193,6 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 ※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
 """
 
-    # 無料枠で確実に利用できるFlashモデルを順番に試行
     free_models = [
         "gemini-2.0-flash",
         "gemini-1.5-flash",
@@ -202,7 +200,7 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
         "gemini-1.5-flash-8b"
     ]
     
-    last_err = ""
+    errors = []
     for model_name in free_models:
         try:
             model = genai.GenerativeModel(model_name)
@@ -210,10 +208,10 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
             if response.text:
                 return response.text, None
         except Exception as e:
-            last_err = str(e)
+            errors.append(f"[{model_name}] {e}")
             continue
             
-    return None, last_err
+    return None, "\n".join(errors)
 
 # -------------------------------------------------------------
 # UIレイアウト
@@ -300,6 +298,8 @@ else:
                     st.markdown(ai_text)
                 else:
                     st.warning("⚠️ Geminiの無料枠制限・通信エラーが発生したため、ルールベース判定に切り替えました。")
+                    with st.expander("🔍 エラー詳細を確認する"):
+                        st.code(err, language="text")
                     st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
         else:
             st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
