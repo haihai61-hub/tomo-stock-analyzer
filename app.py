@@ -8,6 +8,7 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 import re
+import google.generativeai as genai
 
 st.set_page_config(page_title="TOMO流 需給×チャート全自動診断", page_icon="📈", layout="wide")
 
@@ -23,7 +24,7 @@ components.html(
 )
 
 # -------------------------------------------------------------
-# 銘柄名 ＆ 信用買残（東証公表値）の全自動スクレイピング
+# 銘柄名 ＆ 信用買残（東証公表値）のスクレイピング
 # -------------------------------------------------------------
 @st.cache_data(ttl=600)
 def fetch_info_and_margin(ticker_code: str):
@@ -32,10 +33,7 @@ def fetch_info_and_margin(ticker_code: str):
     headers = {"User-Agent": "Mozilla/5.0"}
     
     company_name = code
-    margin_buy = 0
-    margin_sell = 0
-    margin_ratio = 0.0
-    margin_date = ""
+    margin_buy, margin_sell, margin_ratio, margin_date = 0, 0, 0.0, ""
 
     try:
         res = requests.get(url, headers=headers, timeout=5)
@@ -74,7 +72,7 @@ def fetch_info_and_margin(ticker_code: str):
     }
 
 # -------------------------------------------------------------
-# 株価・出来高（東証実データ）取得
+# 東証実データの取得
 # -------------------------------------------------------------
 @st.cache_data(ttl=60)
 def fetch_real_market_data(ticker_code: str):
@@ -109,6 +107,9 @@ def fetch_real_market_data(ticker_code: str):
     except Exception as e:
         return None, f"データ取得エラー: {e}"
 
+# -------------------------------------------------------------
+# 需給・価格帯別出来高の計算
+# -------------------------------------------------------------
 def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     regular_volume = int(df['Volume'].tail(40).median())
     turnover_days = margin_buy / regular_volume if regular_volume > 0 else 0
@@ -130,7 +131,46 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
         "vol_counts": counts
     }
 
-def run_diagnostic(ticker: str, company_name: str, metrics: dict, stockscope_inputs: dict):
+# -------------------------------------------------------------
+# 生成AI（Gemini）による生きたトレード診断エンジン
+# -------------------------------------------------------------
+def run_ai_gemini_diagnostic(api_key: str, ticker: str, name: str, meta: dict, metrics: dict, stockscope: dict):
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        prompt = f"""
+あなたは株式需給分析のスペシャリスト（トレーダーTOMO流）です。
+以下の客観的な東証市場データおよび需給数値をもとに、実践的なトレード診断レポートを作成してください。
+
+【銘柄情報】
+- 銘柄名: {name} ({meta['symbol']})
+- 確定終値: {meta['close']:,} 円 ({meta['diff']})
+- 直近取引日出来高: {meta['volume']:,} 株
+- 平常時の常時出来高（直近中央値）: {metrics['regular_volume']:,} 株
+
+【需給データ】
+- 信用買残: {stockscope['margin_buy']:,} 株
+- 買残 / 常時出来高: {metrics['turnover_days']} 倍（消化にかかる日数感）
+- 推定しこり率: {metrics['shikori_rate']}%（現在値より上で捕まっている含み損玉の割合）
+- 制度信用比率: {stockscope['seido_ratio']}%（6ヶ月期日リスクの度合い）
+- 機関空売り動向: {stockscope['short_trend']}
+
+【診断作成の指示】
+1. 最初に【総合判定】として、「🚀 青天井・全員含み益（上値軽快）」「⚠️ 上値激重・手出し無用（しこり優勢）」「⚖️ 需給拮抗・もみ合い警戒」等の明快な結論を一目でわかるように提示してください。
+2. 「需給構造のポイント」として、しこり率の重さ/軽さ、出来高と買残のバランス、制度信用期日の投げ売りリスクを簡潔に分析してください。
+3. 「実戦トレード戦略」として、押し目買いの目途ライン、ブレイク狙いの条件、見送るべき理由などを、TOMO氏のように具体的かつ歯切れよくアドバイスしてください。
+4. 過剰な免責事項や長々とした前置きは省き、マークダウン形式で要点をシャープにまとめてください。
+"""
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"⚠️ Gemini API呼び出しエラー: {e}\n\n※APIキーを確認してください。未入力の場合は従来のルール判定で表示されます。"
+
+# -------------------------------------------------------------
+# 従来型のフォールバック（定型ルール判定）
+# -------------------------------------------------------------
+def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
     overhang = metrics['turnover_days']
     seido = stockscope_inputs['seido_ratio']
@@ -157,14 +197,20 @@ def run_diagnostic(ticker: str, company_name: str, metrics: dict, stockscope_inp
 
 **2. トレード結論**
 - {action}
+
+*(※Gemini API未接続のため、高速ルール判定で表示中)*
 """
 
-st.title("📊 TOMO流 需給×チャート全自動診断")
-st.caption("東証の実データ ＋ 東証公表の信用買残を完全自動照合")
+# -------------------------------------------------------------
+# UIレイアウト
+# -------------------------------------------------------------
+st.title("📊 TOMO流 需給×チャート全自動診断 ＋ AI")
+st.caption("東証の完全一致実データ ＋ 価格帯別出来高 ＋ Gemini AI診断")
 
+# サイドバー
 with st.sidebar:
     st.header("🔍 分析銘柄の指定")
-    ticker_input = st.text_input("東証コード（例: 446A, 285A, 5803, 7203）", value="446A")
+    ticker_input = st.text_input("東証コード（例: 6857, 446A, 285A）", value="6857")
     
     scraped_info = fetch_info_and_margin(ticker_input)
     auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
@@ -175,7 +221,13 @@ with st.sidebar:
     seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
     short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
 
-with st.spinner(f"銘柄「{ticker_input}」の株価・需給データを取得中..."):
+    st.markdown("---")
+    st.header("🔑 Gemini API設定")
+    # Streamlit Secretsに設定があるか確認、なければ入力ボックス
+    api_key_env = st.secrets.get("GEMINI_API_KEY", "")
+    api_key_input = st.text_input("Gemini API Key", value=api_key_env, type="password", help="Google AI Studioで取得したAPIキーを入力すると、本物のAIが文章を生成します。")
+
+with st.spinner(f"銘柄「{ticker_input}」のデータを取得・解析中..."):
     res = fetch_real_market_data(ticker_input)
 
 if res[0] is None:
@@ -213,8 +265,17 @@ else:
         st.plotly_chart(fig, use_container_width=True)
 
     with col_ai:
-        st.subheader(f"🤖 TOMO流 診断 [{company_name}]")
-        st.markdown(run_diagnostic(ticker_input, company_name, metrics, stockscope_data))
+        st.subheader(f"🤖 TOMO流 診断レポート [{company_name}]")
+        
+        active_key = api_key_input.strip() if api_key_input else ""
+        if active_key:
+            with st.spinner("Gemini AIが相場と需給構造を深掘り分析中..."):
+                report = run_ai_gemini_diagnostic(active_key, ticker_input, company_name, meta_info, metrics, stockscope_data)
+                st.markdown(report)
+        else:
+            st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
+            st.info("💡 左下のサイドバーにGemini APIキーを入力すると、本物のAIによる完全オーダーメイド診断に切り替わります。")
+
         st.markdown("---")
         st.write(f"- 直近出来高: **{meta_info['volume']:,} 株**")
         st.write(f"- 平常時の常時出来高: **{metrics['regular_volume']:,} 株**")
