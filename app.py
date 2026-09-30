@@ -225,7 +225,6 @@ else:
         
         report_key = f"ai_report_{meta_info['symbol']}"
 
-        # AI診断実行ボタン
         col_btn1, col_btn2 = st.columns([1.2, 0.8])
         with col_btn1:
             trigger_ai = st.button("✨ Gemini AIで深掘り診断を実行", use_container_width=True, type="primary")
@@ -235,7 +234,6 @@ else:
                     del st.session_state[report_key]
                     st.rerun()
 
-        # ボタンが押された時だけAPIを1回呼ぶ
         if trigger_ai:
             if not api_key_env:
                 st.error("Secretsに `GEMINI_API_KEY` が設定されていません。")
@@ -272,13 +270,9 @@ else:
                             st.session_state[report_key] = response.text + "\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
                             st.rerun()
                     except Exception as e:
-                        err_str = str(e)
-                        if "429" in err_str:
-                            st.error("⏳ Googleのアクセス制限中です。約30秒待ってからもう一度ボタンを押してください。")
-                        else:
-                            st.error(f"APIエラー: {err_str}")
+                        # 生のエラーをそのまま表示
+                        st.error(f"【Google APIエラー】: {e}")
 
-        # レポートの表示制御
         if report_key in st.session_state:
             st.markdown(st.session_state[report_key])
         else:
