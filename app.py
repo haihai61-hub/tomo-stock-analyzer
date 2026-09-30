@@ -131,7 +131,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 定型ルール判定（フォールバック）
+# 定型ルール判定（安全な受け皿）
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -163,9 +163,9 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 """
 
 # -------------------------------------------------------------
-# Gemini AIエンジン（gemini-3.8-flash直結）
+# Gemini AIエンジン（レートリミット保護付き）
 # -------------------------------------------------------------
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
     genai.configure(api_key=api_key)
     
@@ -193,26 +193,24 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 ※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
 """
 
-    target_models = [
-        "models/gemini-3.8-flash",
-        "gemini-3.8-flash",
-        "models/gemini-3.8-flash-latest",
-        "gemini-3.8-flash-latest"
-    ]
-    
-    errors = []
-    for model_name in target_models:
+    models_to_try = ["gemini-3.8-flash", "gemini-3.7-flash"]
+    last_err_type = "unknown"
+
+    for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response.text:
-                footer = f"\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
-                return response.text + footer, None
+                footer = f"\n\n---\n*🤖 診断エンジン: {model_name}（リアルタイムAI解析）*"
+                return response.text + footer, None, None
         except Exception as e:
-            errors.append(f"[{model_name}] {e}")
+            err_str = str(e)
+            if "429" in err_str:
+                return None, "rate_limit", err_str
+            last_err_type = err_str
             continue
             
-    return None, "\n\n".join(errors)
+    return None, "other", last_err_type
 
 # -------------------------------------------------------------
 # UIレイアウト
@@ -220,23 +218,25 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 st.title("📊 TOMO流 需給×チャート全自動診断 ＋ AI")
 st.caption("東証の完全一致実データ ＋ 価格帯別出来高 ＋ Gemini AI診断")
 
+# サイドバー（フォーム化して無駄なAPI呼び出しを防止）
 with st.sidebar:
-    st.header("🔍 分析銘柄の指定")
-    ticker_input = st.text_input("東証コード（例: 6857, 446A, 285A）", value="6857")
-    
-    scraped_info = fetch_info_and_margin(ticker_input)
-    auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
+    st.header("🔍 分析設定")
+    with st.form("analysis_form"):
+        ticker_input = st.text_input("東証コード（例: 6857, 446A, 285A）", value="6857")
+        
+        scraped_info = fetch_info_and_margin(ticker_input)
+        auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
 
-    st.markdown("---")
-    st.header("📋 需給パラメーター（自動セット済）")
-    margin_buy_input = st.number_input("信用買残（株数）", value=auto_buy, step=10000)
-    seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
-    short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
+        st.markdown("---")
+        st.subheader("📋 需給パラメーター")
+        margin_buy_input = st.number_input("信用買残（株数）", value=auto_buy, step=10000)
+        seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
+        short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
 
-    st.markdown("---")
-    st.header("🔑 Gemini API設定")
-    api_key_env = st.secrets.get("GEMINI_API_KEY", "")
-    api_key_input = st.text_input("Gemini API Key", value=api_key_env, type="password")
+        # Secretsから取得、なければ空文字
+        api_key_env = st.secrets.get("GEMINI_API_KEY", "")
+        
+        submitted = st.form_submit_button("🔍 この条件で分析を実行", use_container_width=True)
 
 with st.spinner(f"銘柄「{ticker_input}」のデータを取得・解析中..."):
     res = fetch_real_market_data(ticker_input)
@@ -278,11 +278,10 @@ else:
     with col_ai:
         st.subheader(f"🤖 TOMO流 診断レポート [{company_name}]")
         
-        active_key = api_key_input.strip() if api_key_input else ""
-        if active_key:
+        if api_key_env:
             with st.spinner("Gemini AIが需給構造を深掘り分析中..."):
-                ai_text, err = get_cached_ai_report(
-                    active_key,
+                ai_text, err_type, err_raw = get_cached_ai_report(
+                    api_key_env,
                     meta_info['symbol'],
                     company_name,
                     meta_info['close'],
@@ -297,14 +296,17 @@ else:
                 )
                 if ai_text:
                     st.markdown(ai_text)
+                elif err_type == "rate_limit":
+                    st.info("⏳ **無料枠の短時間アクセス制限（1分間5回まで）中です。**\n約30〜40秒待ってから再実行してください。それまでは高速ルール判定を表示します。")
+                    st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
                 else:
-                    st.warning("⚠️ Geminiの無料枠制限・通信エラーが発生したため、ルールベース判定に切り替えました。")
-                    with st.expander("🔍 エラー詳細を確認する"):
-                        st.code(err, language="text")
+                    st.warning("⚠️ 通信エラーが発生したため、ルールベース判定を表示します。")
+                    with st.expander("🔍 エラー詳細"):
+                        st.code(err_raw, language="text")
                     st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
         else:
             st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
-            st.info("💡 左下のサイドバーにGemini APIキーを入力すると、本物のAIによる完全オーダーメイド診断に切り替わります。")
+            st.info("💡 StreamlitのSecretsに `GEMINI_API_KEY` を設定すると、完全自動でAI診断に切り替わります。")
 
         st.markdown("---")
         st.write(f"- 直近出来高: **{meta_info['volume']:,} 株**")
