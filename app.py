@@ -131,7 +131,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 定型ルール判定（安全な受け皿）
+# 定型ルール判定（安全受け皿）
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -163,10 +163,10 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 """
 
 # -------------------------------------------------------------
-# Gemini AIエンジン（レートリミット保護付き）
+# 成功時のみキャッシュするGeminiエンジン
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
+def execute_gemini_analysis(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
     genai.configure(api_key=api_key)
     
     prompt = f"""
@@ -193,24 +193,12 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 ※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
 """
 
-    models_to_try = ["gemini-3.8-flash", "gemini-3.7-flash"]
-    last_err_type = "unknown"
-
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response.text:
-                footer = f"\n\n---\n*🤖 診断エンジン: {model_name}（リアルタイムAI解析）*"
-                return response.text + footer, None, None
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str:
-                return None, "rate_limit", err_str
-            last_err_type = err_str
-            continue
-            
-    return None, "other", last_err_type
+    model = genai.GenerativeModel("gemini-3.8-flash")
+    response = model.generate_content(prompt)
+    if not response.text:
+        raise ValueError("AIからの応答が空でした。")
+        
+    return response.text + "\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
 
 # -------------------------------------------------------------
 # UIレイアウト
@@ -218,11 +206,10 @@ def get_cached_ai_report(api_key: str, symbol: str, company_name: str, close_pri
 st.title("📊 TOMO流 需給×チャート全自動診断 ＋ AI")
 st.caption("東証の完全一致実データ ＋ 価格帯別出来高 ＋ Gemini AI診断")
 
-# サイドバー（フォーム化して無駄なAPI呼び出しを防止）
 with st.sidebar:
     st.header("🔍 分析設定")
     with st.form("analysis_form"):
-        ticker_input = st.text_input("東証コード（例: 6857, 446A, 285A）", value="6857")
+        ticker_input = st.text_input("東証コード（例: 6857, 5232, 446A）", value="5232")
         
         scraped_info = fetch_info_and_margin(ticker_input)
         auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
@@ -233,7 +220,6 @@ with st.sidebar:
         seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
         short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
 
-        # Secretsから取得、なければ空文字
         api_key_env = st.secrets.get("GEMINI_API_KEY", "")
         
         submitted = st.form_submit_button("🔍 この条件で分析を実行", use_container_width=True)
@@ -280,33 +266,32 @@ else:
         
         if api_key_env:
             with st.spinner("Gemini AIが需給構造を深掘り分析中..."):
-                ai_text, err_type, err_raw = get_cached_ai_report(
-                    api_key_env,
-                    meta_info['symbol'],
-                    company_name,
-                    meta_info['close'],
-                    meta_info['diff'],
-                    meta_info['volume'],
-                    metrics['regular_volume'],
-                    stockscope_data['margin_buy'],
-                    metrics['turnover_days'],
-                    metrics['shikori_rate'],
-                    stockscope_data['seido_ratio'],
-                    stockscope_data['short_trend']
-                )
-                if ai_text:
+                try:
+                    ai_text = execute_gemini_analysis(
+                        api_key_env,
+                        meta_info['symbol'],
+                        company_name,
+                        meta_info['close'],
+                        meta_info['diff'],
+                        meta_info['volume'],
+                        metrics['regular_volume'],
+                        stockscope_data['margin_buy'],
+                        metrics['turnover_days'],
+                        metrics['shikori_rate'],
+                        stockscope_data['seido_ratio'],
+                        stockscope_data['short_trend']
+                    )
                     st.markdown(ai_text)
-                elif err_type == "rate_limit":
-                    st.info("⏳ **無料枠の短時間アクセス制限（1分間5回まで）中です。**\n約30〜40秒待ってから再実行してください。それまでは高速ルール判定を表示します。")
-                    st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
-                else:
-                    st.warning("⚠️ 通信エラーが発生したため、ルールベース判定を表示します。")
-                    with st.expander("🔍 エラー詳細"):
-                        st.code(err_raw, language="text")
+                except Exception as e:
+                    err_msg = str(e)
+                    if "429" in err_msg:
+                        st.info("⏳ **無料枠の短時間アクセス制限（1分間5回まで）中です。**\n約30秒待ってから「🔍 この条件で分析を実行」をもう一度押してください。")
+                    else:
+                        st.warning(f"⚠️ 通信エラー: {err_msg}")
                     st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
         else:
             st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
-            st.info("💡 StreamlitのSecretsに `GEMINI_API_KEY` を設定すると、完全自動でAI診断に切り替わります。")
+            st.info("💡 Secretsに `GEMINI_API_KEY` を設定してください。")
 
         st.markdown("---")
         st.write(f"- 直近出来高: **{meta_info['volume']:,} 株**")
