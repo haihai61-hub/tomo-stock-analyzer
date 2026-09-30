@@ -131,7 +131,7 @@ def calculate_metrics(df: pd.DataFrame, margin_buy: int, current_price: float):
     }
 
 # -------------------------------------------------------------
-# 定型ルール判定（安全受け皿）
+# 高速定型ルール判定
 # -------------------------------------------------------------
 def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs: dict):
     shikori = metrics['shikori_rate']
@@ -163,44 +163,6 @@ def run_fallback_diagnostic(company_name: str, metrics: dict, stockscope_inputs:
 """
 
 # -------------------------------------------------------------
-# 成功時のみキャッシュするGeminiエンジン
-# -------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def execute_gemini_analysis(api_key: str, symbol: str, company_name: str, close_price: float, diff: str, volume: int, reg_vol: int, margin_buy: int, turnover_days: float, shikori: float, seido: float, short_trend: str):
-    genai.configure(api_key=api_key)
-    
-    prompt = f"""
-あなたは株式需給分析の専門家（トレーダーTOMO流）です。
-以下の客観的な東証市場データおよび需給数値をもとに、歯切れの良い実践的なトレード診断レポートを作成してください。
-
-【銘柄情報】
-- 銘柄名: {company_name} ({symbol})
-- 確定終値: {close_price:,} 円 ({diff})
-- 直近取引日出来高: {volume:,} 株
-- 平常時の常時出来高（直近中央値）: {reg_vol:,} 株
-
-【需給データ】
-- 信用買残: {margin_buy:,} 株
-- 買残 / 常時出来高: {turnover_days} 倍（消化にかかる日数感）
-- 推定しこり率: {shikori}%（現在値より上で捕まっている含み損玉の割合）
-- 制度信用比率: {seido}%（6ヶ月期日リスクの度合い）
-- 機関空売り動向: {short_trend}
-
-【診断レポートの構成】
-1. 【総合判定】: 「🚀 青天井・全員含み益（上値軽快）」「⚠️ 上値激重・手出し無用（しこり優勢）」「⚖️ 需給拮抗・もみ合い警戒」等の明確な結論。
-2. 【需給の急所】: しこり玉の薄さ/重さ、出来高と買残の消化力、期日の投げリスクなどを簡潔に解説。
-3. 【トレード戦略】: 節目となるライン（支持帯・抵抗帯）、ブレイク狙い・押し目買い・見送りの具体判断。
-※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
-"""
-
-    model = genai.GenerativeModel("gemini-3.8-flash")
-    response = model.generate_content(prompt)
-    if not response.text:
-        raise ValueError("AIからの応答が空でした。")
-        
-    return response.text + "\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
-
-# -------------------------------------------------------------
 # UIレイアウト
 # -------------------------------------------------------------
 st.title("📊 TOMO流 需給×チャート全自動診断 ＋ AI")
@@ -208,21 +170,18 @@ st.caption("東証の完全一致実データ ＋ 価格帯別出来高 ＋ Gemi
 
 with st.sidebar:
     st.header("🔍 分析設定")
-    with st.form("analysis_form"):
-        ticker_input = st.text_input("東証コード（例: 6857, 5232, 446A）", value="5232")
-        
-        scraped_info = fetch_info_and_margin(ticker_input)
-        auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
+    ticker_input = st.text_input("東証コード（例: 6857, 5232, 446A）", value="5232")
+    
+    scraped_info = fetch_info_and_margin(ticker_input)
+    auto_buy = scraped_info['margin_buy'] if scraped_info['margin_buy'] > 0 else 1000000
 
-        st.markdown("---")
-        st.subheader("📋 需給パラメーター")
-        margin_buy_input = st.number_input("信用買残（株数）", value=auto_buy, step=10000)
-        seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
-        short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
+    st.markdown("---")
+    st.subheader("📋 需給パラメーター")
+    margin_buy_input = st.number_input("信用買残（株数）", value=auto_buy, step=10000)
+    seido_ratio_input = st.slider("制度信用比率（%）", 0.0, 100.0, 40.0, 5.0)
+    short_trend_input = st.selectbox("機関の空売り動向", ["空売り残高なし（該当なし）", "買い戻し（ショートカバー期待）", "横ばい・変化なし", "売り増し傾向（重圧）"])
 
-        api_key_env = st.secrets.get("GEMINI_API_KEY", "")
-        
-        submitted = st.form_submit_button("🔍 この条件で分析を実行", use_container_width=True)
+    api_key_env = st.secrets.get("GEMINI_API_KEY", "")
 
 with st.spinner(f"銘柄「{ticker_input}」のデータを取得・解析中..."):
     res = fetch_real_market_data(ticker_input)
@@ -264,34 +223,67 @@ else:
     with col_ai:
         st.subheader(f"🤖 TOMO流 診断レポート [{company_name}]")
         
-        if api_key_env:
-            with st.spinner("Gemini AIが需給構造を深掘り分析中..."):
-                try:
-                    ai_text = execute_gemini_analysis(
-                        api_key_env,
-                        meta_info['symbol'],
-                        company_name,
-                        meta_info['close'],
-                        meta_info['diff'],
-                        meta_info['volume'],
-                        metrics['regular_volume'],
-                        stockscope_data['margin_buy'],
-                        metrics['turnover_days'],
-                        metrics['shikori_rate'],
-                        stockscope_data['seido_ratio'],
-                        stockscope_data['short_trend']
-                    )
-                    st.markdown(ai_text)
-                except Exception as e:
-                    err_msg = str(e)
-                    if "429" in err_msg:
-                        st.info("⏳ **無料枠の短時間アクセス制限（1分間5回まで）中です。**\n約30秒待ってから「🔍 この条件で分析を実行」をもう一度押してください。")
-                    else:
-                        st.warning(f"⚠️ 通信エラー: {err_msg}")
-                    st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
+        report_key = f"ai_report_{meta_info['symbol']}"
+
+        # AI診断実行ボタン
+        col_btn1, col_btn2 = st.columns([1.2, 0.8])
+        with col_btn1:
+            trigger_ai = st.button("✨ Gemini AIで深掘り診断を実行", use_container_width=True, type="primary")
+        with col_btn2:
+            if report_key in st.session_state:
+                if st.button("🔄 通常判定に戻す", use_container_width=True):
+                    del st.session_state[report_key]
+                    st.rerun()
+
+        # ボタンが押された時だけAPIを1回呼ぶ
+        if trigger_ai:
+            if not api_key_env:
+                st.error("Secretsに `GEMINI_API_KEY` が設定されていません。")
+            else:
+                with st.spinner("Gemini AIが需給構造を深掘り分析中..."):
+                    try:
+                        genai.configure(api_key=api_key_env)
+                        prompt = f"""
+あなたは株式需給分析の専門家（トレーダーTOMO流）です。
+以下の客観的な東証市場データおよび需給数値をもとに、歯切れの良い実践的なトレード診断レポートを作成してください。
+
+【銘柄情報】
+- 銘柄名: {company_name} ({meta_info['symbol']})
+- 確定終値: {meta_info['close']:,} 円 ({meta_info['diff']})
+- 直近取引日出来高: {meta_info['volume']:,} 株
+- 平常時の常時出来高（直近中央値）: {metrics['regular_volume']:,} 株
+
+【需給データ】
+- 信用買残: {stockscope_data['margin_buy']:,} 株
+- 買残 / 常時出来高: {metrics['turnover_days']} 倍（消化にかかる日数感）
+- 推定しこり率: {metrics['shikori_rate']}%（現在値より上で捕まっている含み損玉の割合）
+- 制度信用比率: {stockscope_data['seido_ratio']}%（6ヶ月期日リスクの度合い）
+- 機関空売り動向: {stockscope_data['short_trend']}
+
+【診断レポートの構成】
+1. 【総合判定】: 「🚀 青天井・全員含み益（上値軽快）」「⚠️ 上値激重・手出し無用（しこり優勢）」「⚖️ 需給拮抗・もみ合い警戒」等の明確な結論。
+2. 【需給の急所】: しこり玉の薄さ/重さ、出来高と買残の消化力、期日の投げリスクなどを簡潔に解説。
+3. 【トレード戦略】: 節目となるライン（支持帯・抵抗帯）、ブレイク狙い・押し目買い・見送りの具体判断。
+※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
+"""
+                        model = genai.GenerativeModel("gemini-3.8-flash")
+                        response = model.generate_content(prompt)
+                        if response.text:
+                            st.session_state[report_key] = response.text + "\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
+                            st.rerun()
+                    except Exception as e:
+                        err_str = str(e)
+                        if "429" in err_str:
+                            st.error("⏳ Googleのアクセス制限中です。約30秒待ってからもう一度ボタンを押してください。")
+                        else:
+                            st.error(f"APIエラー: {err_str}")
+
+        # レポートの表示制御
+        if report_key in st.session_state:
+            st.markdown(st.session_state[report_key])
         else:
             st.markdown(run_fallback_diagnostic(company_name, metrics, stockscope_data))
-            st.info("💡 Secretsに `GEMINI_API_KEY` を設定してください。")
+            st.caption("💡 上の「✨ Gemini AIで深掘り診断を実行」ボタンを押すと、この銘柄をAIが個別深掘りします。")
 
         st.markdown("---")
         st.write(f"- 直近出来高: **{meta_info['volume']:,} 株**")
