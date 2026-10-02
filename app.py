@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import google.generativeai as genai
+from google.api_core import retry
 
 st.set_page_config(page_title="TOMO流 需給×チャート全自動診断 ＋ AI", page_icon="📈", layout="wide")
 
@@ -234,6 +235,7 @@ else:
                     del st.session_state[report_key]
                     st.rerun()
 
+        # ボタン押下時のみ実行
         if trigger_ai:
             if not api_key_env:
                 st.error("Secretsに `GEMINI_API_KEY` が設定されていません。")
@@ -264,15 +266,18 @@ else:
 3. 【トレード戦略】: 節目となるライン（支持帯・抵抗帯）、ブレイク狙い・押し目買い・見送りの具体判断。
 ※不要な前置きや免責事項は省き、マークダウン形式でシャープに出力してください。
 """
+                        # 自動リトライを完全に無効化して「1リクエスト厳守」
+                        no_retry = retry.Retry(predicate=lambda exc: False)
                         model = genai.GenerativeModel("gemini-3.8-flash")
-                        response = model.generate_content(prompt)
+                        response = model.generate_content(prompt, request_options={"retry": no_retry})
+                        
                         if response.text:
                             st.session_state[report_key] = response.text + "\n\n---\n*🤖 診断エンジン: gemini-3.8-flash（リアルタイムAI解析）*"
                             st.rerun()
                     except Exception as e:
-                        # 生のエラーをそのまま表示
                         st.error(f"【Google APIエラー】: {e}")
 
+        # レポート表示
         if report_key in st.session_state:
             st.markdown(st.session_state[report_key])
         else:
